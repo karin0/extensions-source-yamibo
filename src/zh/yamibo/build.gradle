@@ -1,0 +1,7 @@
+ext {
+    extName = 'Yamibo Forum'
+    extClass = '.Yamibo'
+    extVersionCode = 1
+}
+
+apply from: "$rootDir/common.gradle"
