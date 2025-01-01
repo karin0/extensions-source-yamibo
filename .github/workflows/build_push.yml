@@ -4,27 +4,29 @@ on:
   push:
     branches:
       - main
+      - yamibo
     paths:
-      - '**'
-      - '!**.md'
-      - '!.github/**'
-      - '.github/scripts/**'
-      - '.github/workflows/build_push.yml'
+      - "**"
+      - "!**.md"
+      - "!.github/**"
+      - ".github/scripts/**"
+      - ".github/workflows/build_push.yml"
   workflow_dispatch:
 
-permissions: {}
+permissions:
+  contents: write
 
 concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: true
 
 env:
-  CI_CHUNK_SIZE: 65
+  CI_CHUNK_SIZE: 1
   IS_PR_CHECK: false
 
 jobs:
-  prepare:
-    name: Prepare job
+  build:
+    name: Build the only module
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -35,7 +37,6 @@ jobs:
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           fetch-depth: 0
-          persist-credentials: false
 
       - name: Set up Java
         uses: actions/setup-java@dded0888837ed1f317902acf8a20df0ad188d165 # v5.0.0
@@ -43,40 +44,9 @@ jobs:
           java-version: 17
           distribution: temurin
 
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@4d9f0ba0025fe599b4ebab900eb7f3a1d93ef4c2 # v5.0.0
-        with:
-          cache-read-only: true
-
-      - name: Get last successful CI commit
-        uses: nrwl/nx-set-shas@826660b82addbef3abff5fa871492ebad618c9e1 # v4.3.3
-        with:
-          fallback-sha: 4b825dc642cb6eb9a060e54bf8d69288fbee4904 # empty tree
-
-      - id: generate-matrices
-        name: Create output matrices
+      - name: Set extVersionCode to ${{ github.run_number }}
         run: |
-          python ./.github/scripts/generate-build-matrices.py "$NX_BASE" Release
-
-  build:
-    name: Build extensions (${{ matrix.chunk.number }})
-    needs: prepare
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    if: ${{ toJson(fromJson(needs.prepare.outputs.matrix).chunk) != '[]' }}
-    strategy:
-      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
-    steps:
-      - name: Checkout main branch
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          persist-credentials: false
-
-      - name: Set up Java
-        uses: actions/setup-java@dded0888837ed1f317902acf8a20df0ad188d165 # v5.0.0
-        with:
-          java-version: 17
-          distribution: temurin
+          sed -i 's/extVersionCode = 1/extVersionCode = '${{ github.run_number }}'/' src/zh/yamibo/build.gradle
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@4d9f0ba0025fe599b4ebab900eb7f3a1d93ef4c2 # v5.0.0
@@ -93,67 +63,34 @@ jobs:
           ALIAS: ${{ secrets.ALIAS }}
           KEY_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: |
-          ./gradlew $MODULES
-
-      - name: Upload APKs (${{ matrix.chunk.number }})
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
-        if: "github.repository == 'keiyoushi/extensions-source'"
-        with:
-          name: "individual-apks-${{ matrix.chunk.number }}"
-          path: "**/*.apk"
-          retention-days: 1
+        run: ./gradlew src:zh:yamibo:assembleRelease
 
       - name: Clean up CI files
         run: rm signingkey.jks
 
-  publish:
-    name: Publish extension repo
-    needs: [prepare, build]
-    if: "github.repository == 'keiyoushi/extensions-source'"
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Download APK artifacts
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
-        with:
-          path: ~/apk-artifacts
-
-      - name: Set up JDK
-        uses: actions/setup-java@dded0888837ed1f317902acf8a20df0ad188d165 # v5.0.0
-        with:
-          java-version: 17
-          distribution: temurin
-
-      - name: Checkout main branch
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          ref: main
-          path: main
-          persist-credentials: false
-
-      - name: Create repo artifacts
+      - name: Move APKs
         run: |
-          cd main
-          python ./.github/scripts/move-built-apks.py
-          INSPECTOR_LINK="$(curl -s "https://api.github.com/repos/keiyoushi/extensions-inspector/releases/latest" | jq -r '.assets[0].browser_download_url')"
-          curl -L "$INSPECTOR_LINK" -o ./Inspector.jar
-          java -jar ./Inspector.jar "repo/apk" "output.json" "tmp"
-          python ./.github/scripts/create-repo.py
+          mv src/zh/yamibo/build/outputs/apk/release/*.apk .
 
-      - name: Checkout repo branch
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Upload APKs (chunk ${{ matrix.chunk }})
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
-          repository: keiyoushi/extensions
-          token: ${{ secrets.BOT_PAT }}
-          ref: repo
-          path: repo
-          persist-credentials: true
+          name: "individual-apks-${{ matrix.chunk }}"
+          path: "*.apk"
 
-      - name: Merge and deploy repo
+      - name: Create tag
+        run: |
+          git tag rel-${{ github.run_number }}
+          git push origin --tags
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: rel-${{ github.run_number }}
+          name: "Release ${{ github.run_number }}"
+          files: "*.apk"
+
+      - uses: dev-drprasad/delete-older-releases@v0.3.4
+        with:
+          keep_latest: 3
         env:
-          DELETE: ${{ needs.prepare.outputs.delete }}
-        run: |
-          cd repo
-          python ../main/.github/scripts/merge-repo.py "$DELETE"
-          ../main/.github/scripts/commit-repo.sh
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
